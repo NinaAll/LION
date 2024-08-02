@@ -254,5 +254,9 @@ class FBPConvNet(LIONmodel.LIONmodel):
         res = self.block_3_up(torch.cat((block_2_res, self.up_3(res)), dim=1))
         res = self.block_4_up(torch.cat((block_1_res, self.up_4(res)), dim=1))
         res = self.block_last(res)
-        
+
         return image + res
+
+
+# for att in dir(FBPConvNet):
+#    print (att, getattr(FBPConvNet,att))
