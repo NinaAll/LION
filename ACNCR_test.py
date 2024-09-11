@@ -10,6 +10,7 @@ import torch.nn.utils.parametrize as P
 from ts_algorithms import fdk
 from tqdm import tqdm
 import numpy as np
+from torch.autograd import Variable
 
 # import wandb
 from LION.utils.math import power_method
@@ -68,166 +69,202 @@ def my_psnr(x: torch.tensor, y: torch.tensor):
         return np.array(vals)
 
 
-class network(nn.Module):
-    def __init__(self, n_chan=1):
-        super(network, self).__init__()
+class convexnet(nn.Module):
+    def __init__(self, n_channels=16, kernel_size=5, n_layers=5, convex=True, n_chan=1):
+        super().__init__()
+        # self.args=args
+        # self.convex = args.wclip
+        self.n_layers = n_layers
+        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
+        self.smooth_length = 0
+        # these layers can have arbitrary weights
+        self.wxs = nn.ModuleList(
+            [
+                nn.Conv2d(
+                    n_chan,
+                    n_channels,
+                    kernel_size=kernel_size,
+                    stride=1,
+                    padding=2,
+                    bias=True,
+                )
+                for _ in range(self.n_layers + 1)
+            ]
+        )
 
-        self.leaky_relu = nn.LeakyReLU()
+        # these layers should have non-negative weights
+        self.wzs = nn.ModuleList(
+            [
+                nn.Conv2d(
+                    n_channels,
+                    n_channels,
+                    kernel_size=kernel_size,
+                    stride=1,
+                    padding=2,
+                    bias=False,
+                )
+                for _ in range(self.n_layers)
+            ]
+        )
+        self.final_conv2d = nn.Conv2d(
+            n_channels, 1, kernel_size=kernel_size, stride=1, padding=2, bias=False
+        )
+
+        self.initialize_weights()
+
+        # #FoE kernels
+        # self.n_kernels = 10
+        # ker_size=5
+        # self.conv = nn.ModuleList([nn.Conv2d(n_chan, 32, kernel_size=ker_size, stride=1, padding=ker_size//2, bias=False)\
+        #                            for i in range(self.n_kernels)])
+
+    def initialize_weights(self, min_val=0, max_val=1e-3):
+        for layer in range(self.n_layers):
+            self.wzs[layer].weight.data = min_val + (
+                max_val - min_val
+            ) * torch.rand_like(self.wzs[layer].weight.data)
+        self.final_conv2d.weight.data = min_val + (max_val - min_val) * torch.rand_like(
+            self.final_conv2d.weight.data
+        )
+
+    def clamp_weights(self):
+        for i in range(self.smooth_length, self.n_layers):
+            self.wzs[i].weight.data.clamp_(0)
+        self.final_conv2d.weight.data.clamp_(0)
+
+    def wei_dec(self):
+        rate = 10  # 500
+        # for i in range(self.n_kernels):
+        # self.conv[i].weight.data=(1-2*rate*self.args.lr)*self.conv[i].weight.data
+
+    def forward(self, x, grady=False):
+        # for layer in range(self.n_layers):
+        #     print((self.wzs[layer].weight.data<0).sum())
+        # if self.convex:
+        self.clamp_weights()  # makes sure that it is convex
+
+        z = self.leaky_relu(self.wxs[0](x))
+        for layer_idx in range(self.n_layers):
+            z = self.leaky_relu(self.wzs[layer_idx](z) + self.wxs[layer_idx + 1](x))
+        z = self.final_conv2d(z)
+        net_output = z.view(z.shape[0], -1).mean(dim=1, keepdim=True)
+        # assert net_output.shape[0] == x.shape[0], f"{net_output.shape}, {x.shape}"
+        # print(net_output.shape)
+        # print(net_output.mean().item(),foe_out.mean().item(),l2_out.mean().item())
+        return net_output
+
+
+class smooth(nn.Module):
+    def __init__(self, n_chan=1, full_chan=16):
+        super(smooth, self).__init__()
+        self.act = nn.SiLU
+        ker_siz = 7
         self.convnet = nn.Sequential(
-            nn.Conv2d(n_chan, 16, kernel_size=(5, 5), padding=2),
-            self.leaky_relu,
-            nn.Conv2d(16, 32, kernel_size=(5, 5), padding=2),
-            self.leaky_relu,
-            nn.Conv2d(32, 32, kernel_size=(5, 5), padding=2, stride=2),
-            self.leaky_relu,
-            nn.Conv2d(32, 64, kernel_size=(5, 5), padding=2, stride=2),
-            self.leaky_relu,
-            nn.Conv2d(64, 64, kernel_size=(5, 5), padding=2, stride=2),
-            self.leaky_relu,
-            nn.Conv2d(64, 128, kernel_size=(5, 5), padding=2, stride=2),
-            self.leaky_relu,
+            nn.Conv2d(
+                n_chan, full_chan, kernel_size=(ker_siz, ker_siz), padding=ker_siz // 2
+            ),
+            # nn.InstanceNorm2d(16),
+            self.act(),
+            nn.Conv2d(
+                full_chan,
+                full_chan * 2,
+                kernel_size=(ker_siz, ker_siz),
+                padding=ker_siz // 2,
+            ),
+            # nn.InstanceNorm2d(32),
+            # nn.MaxPool2d(5),
+            self.act(),
+            nn.Conv2d(
+                full_chan * 2,
+                full_chan * 2,
+                kernel_size=(ker_siz, ker_siz),
+                padding=ker_siz // 2,
+            ),
+            # nn.InstanceNorm2d(32),
+            self.act(),
+            nn.Conv2d(
+                full_chan * 2,
+                full_chan * 4,
+                kernel_size=(ker_siz, ker_siz),
+                padding=ker_siz // 2,
+            ),
+            # nn.InstanceNorm2d(64),
+            self.act(),
+            nn.Conv2d(
+                full_chan * 4,
+                full_chan * 4,
+                kernel_size=(ker_siz, ker_siz),
+                padding=ker_siz // 2,
+            ),
+            # nn.InstanceNorm2d(64),
+            # nn.MaxPool2d(5),
+            self.act(),
+            # nn.Conv2d(64, 128, kernel_size=(ker_siz, ker_siz),padding=ker_siz//2),
+            # self.act()
         )
-        # size = 1024
-        size = 512
-        self.fc = nn.Sequential(
-            nn.Linear(128 * (size // 2**4) ** 2, 256),
-            self.leaky_relu,
-            nn.Linear(256, 1)
-            # nn.Linear(4, 1)
-        )
+
+        # self.fc = nn.Sequential(
+        #     nn.Linear(128*(config.size//16)**2, 256),
+        #     nn.LeakyReLU(),
+        #     nn.Linear(256, 1)
+        # )
+
+    def init_weights(self, m):
+        pass
+
+    def wei_dec(self):
+        rate = 10  # 500#10
+        for i in range(self.n_kernels):
+            self.convnet[i].weight.data = (1 - 2 * rate * self.args.lr) * self.convnet[
+                i
+            ].weight.data
 
     def forward(self, image):
         output = self.convnet(image)
-        output = output.view(image.size(0), -1)
-        output = self.fc(output)
+        # output = output.view(image.size(0), -1)
+        # output = self.fc(output)
         return output
 
 
-class AR(LIONmodel.LIONmodel):
+# ACNCR network
+
+
+class ACNCR(LIONmodel.LIONmodel):
     def __init__(
         self, geometry_parameters: ct.Geometry, model_parameters: LIONParameter = None
     ):
-
         super().__init__(model_parameters, geometry_parameters)
-        self._make_operator()
 
-        self.network = network()
-        # First Conv
-        self.estimate_lambda()
-        self.step_amounts = torch.tensor([150.0])
-        self.op_norm = power_method(self.op)
-        self.model_parameters.step_size = 0.2 / (self.op_norm) ** 2
+        full_chan = 16  # sparse
+        self.convnet = convexnet(n_channels=16, n_chan=full_chan * 4)
+        self.convnet_data = convexnet(n_channels=16, n_chan=1, n_layers=10)
+        self.op = make_operator(experiment.geo)
+        self.nw = power_method(self.op)
+        self.smooth = smooth()
 
-    def forward(self, x):
-        # x = fdk(self.op, x)
-        x = self.normalise(x)
-        # print(self.pool(z).mean(),self.L2(z).mean())
-        return self.network(x).reshape(
-            -1, 1
-        )  # + self.L2(z) <-- here is an issue because the reshape takes some dimensions which leads to an error
-        # return x
+    def init_weights(self, m):
+        pass
 
-    def estimate_lambda(self, dataset=None):
-        self.lamb = 1.0
-        if dataset is None:
-            self.lamb = 1.0
-        else:
-            residual = 0.0
-            for index, (data, target) in enumerate(dataset):
-                residual += torch.norm(
-                    self.AT(self.A(target) - data), dim=(2, 3)
-                ).mean()
-                # residual += torch.sqrt(((self.AT(self.A(target) - data))**2).sum())
-            self.lamb = residual.mean() / len(dataset)
-        print("Estimated lambda: " + str(self.lamb))
+    def clamp_weights(self):
+        self.convnet.clamp_weights()
+        self.convnet_data.clamp_weights()
 
-    # def output(self, x):
-    # return self.AT(x)
+    def wei_dec(self):
+        self.convnet.wei_dec()
+        self.convnet_data.wei_dec()
+        self.smooth.wei_dec()
 
-    def var_energy(self, x, y):
-        # return torch.norm(x) + 0.5*(torch.norm(self.A(x)-y,dim=(2,3))**2).sum()#self.lamb * self.forward(x).sum()
-        return 0.5 * ((self.A(x) - y) ** 2).sum() + self.lamb * self.forward(x).sum()
-
-    ### What is the difference between .sum() and .mean()??? idfk but PSNR is lower when I do .sum
-
-    def output(self, y, truth=None):
-        # wandb.log({'Eearly_stopping_steps': self.step_amounts.mean().item(), 'Eearly_stopping_steps_std': self.step_amounts.std().item()})
-        x0 = []
-        device = torch.cuda.current_device()
-        for i in range(y.shape[0]):
-            x0.append(fdk(self.op, y[i]))
-        x = torch.stack(x0)
-        # print(x.shape)
-        # print(x.min(),x.max())
-        # print(my_psnr(truth.detach().to(device),x.detach()).mean(),my_ssim(truth.detach().to(device),x.detach()).mean())
-        x = torch.nn.Parameter(x)  # .requires_grad_(True)
-
-        optimizer = torch.optim.SGD(
-            [x], lr=self.model_parameters.step_size, momentum=0.5
-        )  # self.model_parameters.momentum)
-        lr = self.model_parameters.step_size
-        prevpsn = 0
-        curpsn = 0
-        for j in range(self.model_parameters.no_steps):
-            # print(x.min(),x.max())
-            # data_misfit=self.A(x)-y
-            # data_misfit_grad = self.AT(data_misfit)
-
-            optimizer.zero_grad()
-            # reg_func=self.lamb * self.forward(x).mean()
-            # reg_func.backward()
-            # print(x.requires_grad, reg_func.requires_grad)
-            energy = self.var_energy(x, y)
-            energy.backward()
-            while (
-                self.var_energy(x - x.grad * lr, y)
-                > energy - 0.5 * lr * (x.grad.norm(dim=(2, 3)) ** 2).mean()
-            ):
-                lr = self.model_parameters.beta_rate * lr
-                # print('decay')
-            for g in optimizer.param_groups:
-                g["lr"] = lr
-            # x.grad+=data_misfit_grad
-            if truth is not None:
-                loss = WGAN_gradient_penalty_loss()(
-                    x.detach(), truth.detach().to(device)
-                )
-                psnr_val = my_psnr(truth.detach().to(device), x.detach()).mean()
-                ssim_val = my_ssim(truth.detach().to(device), x.detach()).mean()
-                # wandb.log({'MSE Loss': loss.item(),'SSIM':ssim_val,'PSNR':psnr_val})
-                # wandb.log({'MSE Loss'+str(self.model_parameters.step_size): loss.item(),'SSIM'+str(self.model_parameters.step_size):ssim_val,'PSNR'+str(self.model_parameters.step_size):psnr_val})
-                print(
-                    f"{j}: SSIM: {my_ssim(truth.to(device).detach(),x.detach())}, PSNR: {my_psnr(truth.to(device).detach(),x.detach())}, Energy: {energy.detach().item()}"
-                )
-
-                #     if(self.args.outp):
-                #         print(j)
-                prevpsn = curpsn
-                curpsn = psnr_val
-                # if(curpsn<prevpsn):
-                #     self.step_amounts = torch.cat((self.step_amounts,torch.tensor([j*1.0])))
-                #     return x.detach()
-            elif j > self.step_amounts.mean().item():
-                # print('only for testing')
-                x.clamp(min=0.0)
-                return x.detach()
-            elif lr * self.op_norm**2 < 1e-3:
-                x.clamp(min=0.0)
-                return x.detach()
-            optimizer.step()
-            x.clamp(min=0.0)
-        return x.detach()
-
-    def normalise(self, x):
-        return (x - self.model_parameters.xmin) / (
-            self.model_parameters.xmax - self.model_parameters.xmin
-        )
-
-    def unnormalise(self, x):
-        return (
-            x * (self.model_parameters.xmax - self.model_parameters.xmin)
-            + self.model_parameters.xmin
-        )
+    def forward(self, image):
+        # output = self.convnet(self.smooth(image)) + self.convnet_data(data_img)
+        w = self.op(image[0])
+        # w = torch.unsqueeze(w, 0)
+        sinogram = w / self.nw
+        # print('hi')
+        # print(sinogram.shape)
+        # print(sinogram.max(),sinogram.min())
+        # output = self.convnet(self.smooth(sinogram/(config.fwd_op_norm)))# + self.convnet_data(image)
+        output = self.convnet(self.smooth(sinogram)) + self.convnet_data(image)
+        return output
 
     @staticmethod
     def default_parameters():
@@ -246,31 +283,28 @@ class AR(LIONmodel.LIONmodel):
         param.xmax = 1.0
         return param
 
-    @staticmethod
-    def cite(cite_format="MLA"):
-        if cite_format == "MLA":
-            print("Mukherjee, Subhadip, et al.")
-            print('"Data-Driven Convex Regularizers for Inverse Problems."')
-            print(
-                "ICASSP 2024-2024 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP). IEEE, 2024"
-            )
-            print("arXiv:2008.02839 (2020).")
-        elif cite_format == "bib":
-            string = """
-            @inproceedings{mukherjee2024data,
-            title={Data-Driven Convex Regularizers for Inverse Problems},
-            author={Mukherjee, S and Dittmer, S and Shumaylov, Z and Lunz, S and {\"O}ktem, O and Sch{\"o}nlieb, C-B},
-            booktitle={ICASSP 2024-2024 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
-            pages={13386--13390},
-            year={2024},
-            organization={IEEE}
-            }
-            """
-            print(string)
-        else:
-            raise AttributeError(
-                'cite_format not understood, only "MLA" and "bib" supported'
-            )
+
+#%% FBP
+
+
+def fdk_from_geo(sino: torch.Tensor, geo: Geometry):
+    B, _, _, _ = sino.shape
+    op = make_operator(geo)
+    return fdk(sino, op, *geo.image_size[1:])
+
+
+def fdk(sino: torch.Tensor, op: ts.Operator.Operator) -> torch.Tensor:
+    B, _, _, _ = sino.shape
+    recon = None
+    # ts fdk doesn't support mini-batches so we apply it one at a time to each batch
+    for i in range(B):
+        sub_recon = ts_fdk(op, sino[i])
+        sub_recon = torch.clip(sub_recon, min=0)
+        if recon is None:
+            recon = sino.new_zeros(B, 1, *sub_recon.shape[1:])
+        recon[i] = sub_recon
+    assert recon is not None
+    return recon
 
 
 # Learning a regularization functional, i.e. train the AR:
@@ -278,32 +312,27 @@ class AR(LIONmodel.LIONmodel):
 #%% Loss function
 
 
-class WGAN_gradient_penalty_loss(nn.Module):
+class loss_function(nn.Module):
     def __init__(self, mu=10.0 * 1e-2):
         self.mu = mu
         super().__init__()
 
-    def forward(self, model, data_marginal_noisy, data_marginal_real):
+    def forward(self, model, scans, truth):
         """Calculates the gradient penalty loss for WGAN GP"""
-        real_samples = data_marginal_real
-        print(real_samples.shape)
-        fake_samples = data_marginal_noisy
-        print(fake_samples.shape)
-        # fake_samples=fake_samples[:,:,None, None]
-        # print(fake_samples.shape)
+        op = make_operator(experiment.geo)
+        fake_samples = scans
+        real_samples = truth
+
         alpha = torch.Tensor(np.random.random((real_samples.size(0), 1, 1, 1))).type_as(
-            real_samples
+            truth
         )
-        print(alpha.shape)
         interpolates = (
             alpha * real_samples + ((1 - alpha) * fake_samples)
         ).requires_grad_(True)
         net_interpolates = model(interpolates)
-        fake = (
-            torch.Tensor(real_samples.shape[0], 1)
-            .fill_(1.0)
-            .type_as(real_samples)
-            .requires_grad_(False)
+        fake = Variable(
+            torch.Tensor(real_samples.shape[0], 1).fill_(1.0).type_as(truth),
+            requires_grad=False,
         )
         gradients = torch.autograd.grad(
             outputs=net_interpolates,
@@ -315,12 +344,15 @@ class WGAN_gradient_penalty_loss(nn.Module):
         )[0]
 
         gradients = gradients.view(gradients.size(0), -1)
-        # print(model(real_samples).mean()-model(fake_samples).mean(),self.mu*(((gradients.norm(2, dim=1) - 1)) ** 2).mean())
+        # print((gradients.norm(2, dim=1)))
+
+        decay_loss = 0
         loss = (
             model(real_samples).mean()
             - model(fake_samples).mean()
             + self.mu * (((gradients.norm(2, dim=1) - 1)) ** 2).mean()
         )
+        # loss = self.mu*(((gradients.norm(2, dim=1) - 1)) ** 2).mean()#+self.mu*(((gradients_2.norm(2, dim=1) - 1)) ** 2).mean()
         return loss
 
 
@@ -355,24 +387,22 @@ torch.cuda.set_device(device)
 # Define your data paths
 savefolder = pathlib.Path("/store/DAMTP/na673/")
 
-final_result_fname = savefolder.joinpath("AR_final_iter.pt")
-checkpoint_fname = savefolder.joinpath("AR_check_*.pt")
-validation_fname = savefolder.joinpath("AR_min_val.pt")
+final_result_fname = savefolder.joinpath("ACNCR_final_iter.pt")
+checkpoint_fname = savefolder.joinpath("ACNCR_check_*.pt")
+validation_fname = savefolder.joinpath("ACNCR_min_val.pt")
 
 
 #%% Define experiment
 # experiment = ct_experiments.LowDoseCTRecon()
-# experiment = ct_experiments.clinicalCTRecon()
+experiment = ct_experiments.clinicalCTRecon()
 # experiment = ct_experiments.ExtremeLowDoseCTRecon()
-experiment = ct_experiments.SparseAngleCTRecon()
+# experiment = ct_experiments.SparseAngleCTRecon()
 # experiment = ct_experiments.SparseAngleExtremeLowDoseCTRecon()
 
 #%% Dataset
-lidc_dataset = experiment.get_training_dataset()
-lidc_dataset_val = experiment.get_validation_dataset()
 # Give paths to trained models
 savefolder = pathlib.Path("/store/DAMTP/na673/")
-final_result_fname = savefolder.joinpath("AR_final_iter.pt")
+final_result_fname = savefolder.joinpath("ACNCR_final_iter.pt")
 
 # % Set device:
 # set up experiment model was trained on
@@ -381,7 +411,7 @@ test_data = experiment.get_testing_dataset()
 test_dataloader = DataLoader(test_data, 1, shuffle=True)
 
 # load trained model
-model, _, _ = AR.load(final_result_fname)
+model, _, _ = ACNCR.load(final_result_fname)
 model.to(device)
 
 # sample a random batch (size 1, so really just one image, truth pair)
@@ -403,22 +433,6 @@ class function(nn.Module):
         z = model(x)
         return z
 
-
-train_param = LIONParameter()
-train_param.optimiser = "adam"
-
-train_param.epochs = 100
-train_param.learning_rate = (
-    1e-6  # always changeable to see if the code trains: e.g., 1e-4
-)
-train_param.betas = (0.9, 0.99)
-train_param.beta_rate = 0.95
-train_param.loss = "MSELoss"
-data_ar = torch.tensor(data, requires_grad=True)
-
-optimiser = torch.optim.Adam(
-    [data_ar], lr=train_param.learning_rate, betas=train_param.betas
-)
 
 # w = op(data[0])
 # w = torch.unsqueeze(w, 0)
@@ -495,7 +509,7 @@ lmb = estimate_lambda(test_dataloader)
 print(lmb)
 
 x, psnr_in_total = gradient_descent(
-    lmb, 1000, op, y, data, grad_function, model, 1e-6, 0.95
+    lmb, 500, op, y, data, grad_function, model, 1e-8, 0.95
 )
 print(psnr_in_total)
 
@@ -543,7 +557,35 @@ psnr_gt_ni = peak_signal_noise_ratio(
 )
 print("PSNR:", psnr_gt_ni)
 
-# PRSN/SSIM for the whole test data set
+# x = x.detach().cpu().numpy()
+# gt = gt.detach().cpu().numpy()
+# data = data.detach().cpu().numpy()
+
+# plt.figure()
+# plt.subplot(131)
+# plt.imshow(x[0].T)
+# # plt.colorbar()
+# plt.clim(vmin=0.0, vmax=2.5)
+# plt.axis("off")
+# plt.title("ACNCR denoised image")
+# plt.text(0, 650, f"SSIM:{ssim_gt_di:.2f} \nPSNR:{psnr_gt_di:.2f}")
+# plt.subplot(132)
+# plt.imshow(gt[0].T)
+# # plt.colorbar()
+# plt.clim(vmin=0.0, vmax=2.5)
+# plt.axis("off")
+# plt.title("Ground truth")
+# plt.subplot(133)
+# plt.imshow(data[0].T)
+# # plt.colorbar()
+# plt.clim(vmin=0.0, vmax=2.5)
+# plt.axis("off")
+# plt.title("Noisy image")
+# plt.text(0, 650, f"SSIM:{ssim_gt_ni:.2f} \nPSNR:{psnr_gt_ni:.2f}")
+# plt.savefig("acncr_img.png", dpi=300)
+
+
+# # PRSN/SSIM for the whole test data set
 # batch_size = 4
 # lidc_dataloader = DataLoader(test_data, batch_size, shuffle=True)
 # ssim_gt_di_all = []
@@ -551,10 +593,10 @@ print("PSNR:", psnr_gt_ni)
 # psnr_gt_di_all = []
 # psnr_gt_ni_all = []
 
-# for data, gt in iter(test_dataloader):
-#     image = fdk(data, op)
+# for y, gt in iter(test_dataloader):
+#     image = fdk(y, op)
 #     reconstruction, psnr_in_total = gradient_descent(
-#         lmb, 100, op, data, image, grad_function, model, 1e-6, 0.95
+#         lmb, 100, op, y, image, grad_function, model, 1e-6, 0.95
 #     )
 #     gt_eval = gt
 #     gt_eval = np.squeeze(gt_eval)
@@ -611,7 +653,7 @@ plt.imshow(x[0].T)
 # plt.colorbar()
 plt.clim(vmin=0.0, vmax=2.5)
 plt.axis("off")
-plt.title("AR denoised image")
+plt.title("ACNCR denoised image")
 # plt.text(0, 650, f"SSIM:{ssim_gt_di:.2f} \nPSNR:{psnr_gt_di:.2f} \nSSIM mean:{ssim_di_all:.2f} \nPSNR mean:{psnr_di_all:.2f}")
 plt.text(0, 650, f"SSIM:{ssim_gt_di:.2f} \nPSNR:{psnr_gt_di:.2f}")
 plt.subplot(132)
@@ -626,70 +668,7 @@ plt.imshow(data[0].T)
 plt.clim(vmin=0.0, vmax=2.5)
 plt.axis("off")
 plt.title("Noisy image")
-# plt.text(0, 650, f"SSIM:{ssim_gt_ni:.2f} \nPSNR:{psnr_gt_ni:.2f} \nSSIM mean:{ssim_ni_all:.2f} \nPSNR mean:{psnr_ni_all:.2f}")
 plt.text(0, 650, f"SSIM:{ssim_gt_ni:.2f} \nPSNR:{psnr_gt_ni:.2f}")
-plt.savefig("ar_img.pdf", dpi=300)
-
-
-# plt.figure()
-# plt.subplot(121)
-# plt.imshow(x[0].T)
-# plt.colorbar()
-# plt.subplot(122)
-# plt.imshow(data[0].T)
-# plt.colorbar()
-# plt.savefig("AR_unet_new.png")
-
-
-# # A is operator op and it is the radon transform
-# grad_function = function()
-# data = torch.tensor(data, requires_grad = True)
-# model = AR(geometry_parameters=experiment.geo).to(device)
-
-# data = torch.nn.Parameter(data)
-# data_ar = torch.tensor(data, requires_grad = True)
-# z = grad_function(model, data)
-
-# train_param = LIONParameter()
-# train_param.optimiser = "adam"
-
-# train_param.epochs = 100
-# train_param.learning_rate = 1e-4 # always changeable to see if the code trains: e.g., 1e-4
-# train_param.betas = (0.9, 0.99)
-# train_param.loss = "MSELoss"
-# data_ar = torch.tensor(data, requires_grad = True)
-
-# # optimiser = torch.optim.Adam(
-# #    [data_ar], lr=train_param.learning_rate, betas=train_param.betas
-# # )
-
-# optimiser = torch.optim.SGD([data_ar], lr=train_param.learning_rate, momentum=0.5)
-# # z = grad_function(model, data_ar)
-# # z.backward()
-# # data_ar = data_ar.grad * 0.001 * (0.001)
-# # print(data_ar)
-
-# #data_ar = torch.tensor(data, requires_grad = True)
-
-# # z = grad_function(model, data_ar)
-# # z.backward()
-# # data_ar = data_ar.grad * 0.001 * (0.001)
-# # print(data_ar)
-# print('hi')
-# print(data_ar)
-
-# for k in range(200):
-#     data_ar = torch.tensor(data_ar, requires_grad = True)
-#     optimiser.zero_grad()
-#     z = grad_function(model, data_ar)
-#     z.backward()
-#     # print(data_ar.grad)
-#     m = data_ar.grad * 0.5 * (0.000001)
-
-#     w = op.T(op(data_ar[0])-y[0])
-#     w = torch.unsqueeze(w, 0)
-#     #print(w)
-#     w = w * 0.000001
-
-#     data_ar = data_ar - w - m
-#     optimiser.step() # optimiser is the issue
+# plt.text(0, 650, f"SSIM:{ssim_gt_ni:.2f} \nPSNR:{psnr_gt_ni:.2f} \nSSIM mean:{ssim_ni_all:.2f} \nPSNR mean:{psnr_ni_all:.2f}")
+plt.savefig("acncr_img.pdf", dpi=300)
+plt.savefig("acncr_img.png", dpi=300)

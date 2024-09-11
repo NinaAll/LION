@@ -77,6 +77,16 @@ class ICNN_layer(nn.Module):
         )
         P.register_parametrization(self.blue, "weight", Positive())
 
+        self.blue2 = nn.Conv2d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding="same",
+            bias=False,
+        )
+        P.register_parametrization(self.blue2, "weight", Positive())
+
         self.orange = nn.Conv2d(
             in_channels=1,
             out_channels=channels,
@@ -85,6 +95,23 @@ class ICNN_layer(nn.Module):
             padding="same",
             bias=True,
         )
+
+        self.orange2 = nn.Conv2d(
+            in_channels=1,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding="same",
+            bias=True,
+        )
+
+        self.orange_quadratic = nn.Conv2d(
+            1, channels, kernel_size, stride=1, padding="same", bias=False
+        )
+        self.orange_quadratic2 = nn.Conv2d(
+            1, channels, kernel_size, stride=1, padding="same", bias=False
+        )
+
         if relu_type == "LeakyReLU":
             self.activation = nn.LeakyReLU(negative_slope=0.2)
         else:
@@ -94,28 +121,17 @@ class ICNN_layer(nn.Module):
 
     def forward(self, z, x0):
 
-        res = self.blue(z) + self.orange(x0)
+        res = (
+            self.blue(z)
+            + self.orange(x0)
+            + self.orange_quadratic(x0) ** 2
+            + t * (self.blue2(z) + self.orange2(x0) + self.orange_quadratic2(x0) ** 2)
+        )
         res = self.activation(res)
         return res
 
 
-##An L2 tern with learnable weight
-## define a network for training the l2 term
-class L2net(nn.Module):
-    def __init__(self):
-        super(L2net, self).__init__()
-
-        self.l2_penalty = nn.Parameter((-36.0) * torch.ones(1))
-
-    def forward(self, x):
-        l2_term = torch.sum(x.view(x.size(0), -1) ** 2, dim=1)
-        out = ((torch.nn.functional.softplus(self.l2_penalty)) * l2_term).view(
-            x.size(0), -1
-        )
-        return out
-
-
-class ACR(LIONmodel.LIONmodel):
+class ACR_HJ(LIONmodel.LIONmodel):
     def __init__(
         self, geometry_parameters: ct.Geometry, model_parameters: LIONParameter = None
     ):
@@ -161,7 +177,7 @@ class ACR(LIONmodel.LIONmodel):
         P.register_parametrization(self.last_layer, "weight", Positive())
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.L2 = L2net()
+
         self.initialize_weights()
         self.estimate_lambda()
         self.op_norm = power_method(self.op)
@@ -213,7 +229,7 @@ class ACR(LIONmodel.LIONmodel):
 
         z = self.last_layer(z)
         # print(self.pool(z).mean(),self.L2(z).mean())
-        return self.pool(z).reshape(-1, 1) + self.L2(z)
+        return self.pool(z).reshape(-1, 1)
 
     def estimate_lambda(self, dataset=None):
         self.lamb = 1.0
@@ -326,26 +342,4 @@ class ACR(LIONmodel.LIONmodel):
 
     @staticmethod
     def cite(cite_format="MLA"):
-        if cite_format == "MLA":
-            print("Mukherjee, Subhadip, et al.")
-            print('"Data-Driven Convex Regularizers for Inverse Problems."')
-            print(
-                "ICASSP 2024-2024 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP). IEEE, 2024"
-            )
-            print("arXiv:2008.02839 (2020).")
-        elif cite_format == "bib":
-            string = """
-            @inproceedings{mukherjee2024data,
-            title={Data-Driven Convex Regularizers for Inverse Problems},
-            author={Mukherjee, S and Dittmer, S and Shumaylov, Z and Lunz, S and {\"O}ktem, O and Sch{\"o}nlieb, C-B},
-            booktitle={ICASSP 2024-2024 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
-            pages={13386--13390},
-            year={2024},
-            organization={IEEE}
-            }
-            """
-            print(string)
-        else:
-            raise AttributeError(
-                'cite_format not understood, only "MLA" and "bib" supported'
-            )
+        print("None")

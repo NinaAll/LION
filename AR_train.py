@@ -377,7 +377,7 @@ loss_fcn = WGAN_gradient_penalty_loss()
 train_param.optimiser = "adam"
 
 # optimizer
-train_param.epochs = 3
+train_param.epochs = 25
 train_param.learning_rate = 1e-4
 train_param.betas = (0.9, 0.99)
 train_param.loss = "WGAN_gradient_penalty_loss"
