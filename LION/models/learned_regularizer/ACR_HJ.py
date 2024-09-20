@@ -119,7 +119,7 @@ class ICNN_layer(nn.Module):
                 "Only Leaky ReLU supported (needs to be a convex and monotonically nondecreasin fun)"
             )
 
-    def forward(self, z, x0):
+    def forward(self, z, t, x0):
 
         res = (
             self.blue(z)
