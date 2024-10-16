@@ -633,6 +633,8 @@ class WGAN_HJ_loss(nn.Module):
             + self.mu * (((u_x.norm(2, dim=1) - 1)) ** 2).mean()
         )
         pinn_loss = (u_t + 1 / 2 * u_x.norm(2, dim=1) ** 2).mean()
+        print("WGAN-loss:", wgan_loss)
+        print("PINN-loss:", pinn_loss)
         return self.mu_1 * pinn_loss + wgan_loss
 
 
@@ -765,9 +767,11 @@ for epoch in range(start_epoch, train_param.epochs):
     for sinogram, target_reconstruction in tqdm(lidc_validation):
 
         image = fdk(sinogram, op)
-
+        t = torch.Tensor(np.random.random((target_reconstruction.size(0), 1))).type_as(
+            target_reconstruction
+        )
         reconstruction = image
-        loss = loss_fcn(model, reconstruction, target_reconstruction)
+        loss = loss_fcn(model, reconstruction, target_reconstruction, t)
         valid_loss += loss.item()
     loss_valid.append(valid_loss / len(lidc_dataset_val))
     print(
