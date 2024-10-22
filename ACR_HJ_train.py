@@ -29,6 +29,24 @@ from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
 import matplotlib.pyplot as plt
 
+import wandb
+import random
+
+# start a new wandb run to track this script
+wandb.init(
+    # set the wandb project where this run will be logged
+    dir="/store/DAMTP/na673/",
+    project="ACR_HJ_train",
+    # track hyperparameters and run metadata
+    config={
+        "learning_rate": 1e-4,
+        # "architecture": "CNN",
+        "dataset": "ICCR",
+        "epochs": 25,
+    },
+)
+
+
 # Just a temporary SSIM that takes torch tensors (will be added to LION at some point)
 def my_ssim(x: torch.tensor, y: torch.tensor):
     if x.shape[0] == 1:
@@ -359,6 +377,9 @@ class ACR_HJ(LIONmodel.LIONmodel):
             block.blue.weight.data = min_val + (max_val - min_val) * torch.rand_like(
                 block.blue.weight.data
             )
+            block.blue2.weight.data = min_val + (max_val - min_val) * torch.rand_like(
+                block.blue2.weight.data
+            )
         self.last_layer.weight.data = min_val + (max_val - min_val) * torch.rand_like(
             self.last_layer.weight.data
         )
@@ -492,6 +513,20 @@ class ACR_HJ(LIONmodel.LIONmodel):
             + self.model_parameters.xmin
         )
 
+    def freeze_weights(self):
+        for i in range(self.model_parameters.layers):
+            block = getattr(self, f"ICNN_layer_{i}")
+            block.blue.requires_grad = False
+            block.orange.requires_grad = False
+            block.orange_quadratic.requires_grad = False
+
+    def unfreeze_weights(self):
+        for i in range(self.model_parameters.layers):
+            block = getattr(self, f"ICNN_layer_{i}")
+            block.blue.requires_grad = True
+            block.orange.requires_grad = True
+            block.orange_quadratic.requires_grad = True
+
     @staticmethod
     def default_parameters():
         param = LIONParameter()
@@ -549,7 +584,7 @@ def fwd_gradients(obj, x):
 
 
 class WGAN_HJ_loss(nn.Module):
-    def __init__(self, mu=10.0 * 1e-2, mu_1=1.0):
+    def __init__(self, mu=10.0, mu_1=1e-2):
         self.mu = mu
         self.mu_1 = mu_1
         super().__init__()
@@ -632,10 +667,10 @@ class WGAN_HJ_loss(nn.Module):
             - model(fake_samples, t).mean()
             + self.mu * (((u_x.norm(2, dim=1) - 1)) ** 2).mean()
         )
-        pinn_loss = (u_t + 1 / 2 * u_x.norm(2, dim=1) ** 2).mean()
+        pinn_loss = ((u_t + 1 / 2 * u_x.norm(2, dim=1) ** 2) ** 2).mean()
         print("WGAN-loss:", wgan_loss)
         print("PINN-loss:", pinn_loss)
-        return self.mu_1 * pinn_loss + wgan_loss
+        return pinn_loss, wgan_loss, self.mu_1 * pinn_loss + 0 * wgan_loss
 
 
 #%% FBP
@@ -712,6 +747,7 @@ min_valid_loss = np.inf
 total_loss = np.zeros(train_param.epochs)
 start_epoch = 0
 
+
 # %% Check if there is a checkpoint saved, and if so, start from there.
 
 # If there is a file with the final results, don't run again
@@ -719,10 +755,10 @@ if model.final_file_exists(savefolder.joinpath(final_result_fname)):
     print("final model exists! You already reached final iter")
     exit()
 
-model, optimiser, start_epoch, total_loss, _ = ACR_HJ.load_checkpoint_if_exists(
-    checkpoint_fname, model, optimiser, total_loss
-)
-print(f"Starting iteration at epoch {start_epoch}")
+# model, optimiser, start_epoch, total_loss, _ = ACR_HJ.load_checkpoint_if_exists(
+#     checkpoint_fname, model, optimiser, total_loss
+# )
+# print(f"Starting iteration at epoch {start_epoch}")
 
 op = make_operator(experiment.geo)
 
@@ -748,16 +784,37 @@ for epoch in range(start_epoch, train_param.epochs):
             target_reconstruction
         )
 
-        loss = loss_fcn(model, reconstruction, target_reconstruction, t)
+        loss_pinn, loss_ar, loss = loss_fcn(
+            model, reconstruction, target_reconstruction, t
+        )
         # print(loss.shape)
+        wandb.log(
+            {
+                "PINN-loss": loss_pinn,
+                "ACR-loss": loss_ar,
+            }
+        )
 
-        loss.backward()
+        loss_ar.backward()
 
         # loss = fwd_gradients(loss, reconstruction)
 
-        train_loss += loss.item()
+        optimiser.step()
+
+        model.freeze_weights()
+
+        loss_pinn, loss_ar, loss = loss_fcn(
+            model, reconstruction, target_reconstruction, t
+        )
+
+        loss_pinn.backward()
 
         optimiser.step()
+
+        model.unfreeze_weights()
+
+        train_loss += loss.item()
+
         # scheduler.step()
     total_loss[epoch] = train_loss
     loss_train.append(train_loss / len(lidc_dataset))
@@ -771,8 +828,16 @@ for epoch in range(start_epoch, train_param.epochs):
             target_reconstruction
         )
         reconstruction = image
-        loss = loss_fcn(model, reconstruction, target_reconstruction, t)
+        loss_pinn, loss_ar, loss = loss_fcn(
+            model, reconstruction, target_reconstruction, t
+        )
         valid_loss += loss.item()
+        wandb.log(
+            {
+                "PINN-loss": loss_pinn,
+                "ACR-loss": loss_ar,
+            }
+        )
     loss_valid.append(valid_loss / len(lidc_dataset_val))
     print(
         f"Epoch {epoch+1} \t\t Training Loss: {train_loss / len(lidc_dataset)} \t\t Validation Loss: {valid_loss / len(lidc_dataset_val)}"
@@ -816,3 +881,7 @@ model.save(
     training=train_param,
     dataset=experiment.param,
 )
+
+# in order to not stop the code when the laptop is closed:
+# nohup python ACR_HJ_train.py &
+# tail -f nohup.out
