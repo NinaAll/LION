@@ -13,6 +13,7 @@ from tqdm import tqdm
 import numpy as np
 from torch.autograd import Variable
 from LION.utils.math import power_method
+from torch.utils.data import DataLoader, Subset
 
 # import wandb
 from LION.utils.math import power_method
@@ -715,6 +716,8 @@ experiment = ct_experiments.ExtremeLowDoseCTRecon()
 lidc_dataset = experiment.get_training_dataset()
 lidc_dataset_val = experiment.get_validation_dataset()
 
+# lidc_dataset = Subset(lidc_dataset, range(10))
+
 batch_size = 2
 lidc_dataloader = DataLoader(lidc_dataset, batch_size, shuffle=True)
 lidc_validation = DataLoader(lidc_dataset_val, batch_size, shuffle=True)
@@ -881,6 +884,7 @@ model.save(
     training=train_param,
     dataset=experiment.param,
 )
+
 
 # in order to not stop the code when the laptop is closed:
 # nohup python ACR_HJ_train.py &
