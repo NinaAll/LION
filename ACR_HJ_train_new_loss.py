@@ -36,7 +36,7 @@ import random
 
 wandb.init(
     dir="/store/DAMTP/na673/",
-    project="ACR_HJ_train",
+    project="ACR_HJ_train_new_loss",
     config={
         "learning_rate": 1e-4,
         "dataset": "ICCR",
@@ -558,18 +558,18 @@ class WGAN_HJ_loss(nn.Module):
 
         u_t = fwd_gradients(fct, t)
 
-        wgan_loss = (
-            model(real_samples, torch.zeros_like(t)).mean()
-            - model(fake_samples, torch.zeros_like(t)).mean()
-            + self.mu * (((u_x.norm(2, dim=1) - 1)) ** 2).mean()
-        )
+        # wgan_loss = (
+        #     model(real_samples, torch.zeros_like(t)).mean()
+        #     - model(fake_samples, torch.zeros_like(t)).mean()
+        #     + self.mu * (((u_x.norm(2, dim=1) - 1)) ** 2).mean()
+        # )
         wgan_loss_new = (
             model(real_samples, torch.zeros_like(t)).mean()
             - model(fake_samples - t * u_x_fake, torch.zeros_like(t)).mean()
             + self.mu * ((1 + t)((u_x.norm(2, dim=1) - 1)) ** 2).mean()
         )
         pinn_loss = ((u_t + 1 / 2 * u_x.norm(2, dim=1) ** 2) ** 2).mean()
-        print("WGAN-loss:", wgan_loss)
+        print("WGAN-loss:", wgan_loss_new)
         print("PINN-loss:", pinn_loss)
         return (
             pinn_loss,
@@ -584,9 +584,9 @@ torch.cuda.set_device(device)
 # Define your data paths
 savefolder = pathlib.Path("/store/DAMTP/na673/")
 
-final_result_fname = savefolder.joinpath("ACR_HJ_final_iter.pt")
-checkpoint_fname = savefolder.joinpath("ACR_HJ_check_*.pt")
-validation_fname = savefolder.joinpath("ACR_HJ_min_val.pt")
+final_result_fname = savefolder.joinpath("ACR_HJ_new_loss_final_iter.pt")
+checkpoint_fname = savefolder.joinpath("ACR_HJ_new_loss_check_*.pt")
+validation_fname = savefolder.joinpath("ACR_HJ_new_loss_min_val.pt")
 
 #%% Define experiment
 # experiment = ct_experiments.LowDoseCTRecon(datafolder=datafolder)
@@ -662,7 +662,7 @@ for epoch in range(start_epoch, train_param.epochs):
         reconstruction = image
 
         t = torch.Tensor(
-            np.random.random((target_reconstruction.size(0), 1e-4))
+            np.random.random((target_reconstruction.size(0), 1)) * 1e-4
         ).type_as(target_reconstruction)
 
         loss_pinn, loss_ar, loss = loss_fcn(
@@ -765,5 +765,5 @@ model.save(
 
 
 # in order to not stop the code when the laptop is closed:
-# nohup python ACR_HJ_train.py &
+# nohup python ACR_HJ_train_new_loss.py &
 # tail -f nohup.out
