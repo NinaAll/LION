@@ -33,18 +33,22 @@ import matplotlib.pyplot as plt
 import wandb
 import random
 
-
+# start a new wandb run to track this script
 wandb.init(
+    # set the wandb project where this run will be logged
     dir="/store/DAMTP/na673/",
-    project="ACR_HJ_train_new_loss",
+    project="ACR_HJ_train",
+    # track hyperparameters and run metadata
     config={
         "learning_rate": 1e-4,
+        # "architecture": "CNN",
         "dataset": "ICCR",
         "epochs": 25,
     },
 )
 
 
+# Just a temporary SSIM that takes torch tensors (will be added to LION at some point)
 def my_ssim(x: torch.tensor, y: torch.tensor):
     if x.shape[0] == 1:
         x = x.cpu().numpy().squeeze()
@@ -138,8 +142,13 @@ class convexnet(nn.Module):
 
     def wei_dec(self):
         rate = 10  # 500
+        # for i in range(self.n_kernels):
+        # self.conv[i].weight.data=(1-2*rate*self.args.lr)*self.conv[i].weight.data
 
     def forward(self, x, grady=False):
+        # for layer in range(self.n_layers):
+        #     print((self.wzs[layer].weight.data<0).sum())
+        # if self.convex:
         self.clamp_weights()  # makes sure that it is convex
 
         z = self.leaky_relu(self.wxs[0](x))
@@ -147,6 +156,9 @@ class convexnet(nn.Module):
             z = self.leaky_relu(self.wzs[layer_idx](z) + self.wxs[layer_idx + 1](x))
         z = self.final_conv2d(z)
         net_output = z.view(z.shape[0], -1).mean(dim=1, keepdim=True)
+        # assert net_output.shape[0] == x.shape[0], f"{net_output.shape}, {x.shape}"
+        # print(net_output.shape)
+        # print(net_output.mean().item(),foe_out.mean().item(),l2_out.mean().item())
         return net_output
 
 
@@ -192,8 +204,18 @@ class smooth(nn.Module):
                 kernel_size=(ker_siz, ker_siz),
                 padding=ker_siz // 2,
             ),
+            # nn.InstanceNorm2d(64),
+            # nn.MaxPool2d(5),
             self.act(),
+            # nn.Conv2d(64, 128, kernel_size=(ker_siz, ker_siz),padding=ker_siz//2),
+            # self.act()
         )
+
+        # self.fc = nn.Sequential(
+        #     nn.Linear(128*(config.size//16)**2, 256),
+        #     nn.LeakyReLU(),
+        #     nn.Linear(256, 1)
+        # )
 
     def init_weights(self, m):
         pass
@@ -207,6 +229,8 @@ class smooth(nn.Module):
 
     def forward(self, image):
         output = self.convnet(image)
+        # output = output.view(image.size(0), -1)
+        # output = self.fc(output)
         return output
 
 
@@ -280,6 +304,10 @@ class ICNN_layer(nn.Module):
     def forward(self, z, t, x0):
 
         t_emb = self.time_dense(t.view(-1, 1))
+        # print('hello')
+        # print(t.shape)
+        # print(z.shape)
+        # print(x0.shape)
         res = (
             self.blue(z)
             + self.orange(x0)
@@ -362,6 +390,10 @@ class ACR_HJ(LIONmodel.LIONmodel):
         ###
         ### This is based on a recent paper https://openreview.net/pdf?id=pWZ97hUQtQ
         ###
+        # convex_init = ConvexInitialiser()
+        # w1, b1 = icnn[1].parameters()
+        # convex_init(w1, b1)
+        # assert torch.all(w1 >= 0) and b1.var() > 0
         device = torch.cuda.current_device()
         for i in range(self.model_parameters.layers):
             block = getattr(self, f"ICNN_layer_{i}")
@@ -377,6 +409,7 @@ class ACR_HJ(LIONmodel.LIONmodel):
         return self
 
     def forward(self, x, t):
+        # x = fdk(self.op, x)
         t = t.reshape(-1, 1, 1, 1)
         x = self.normalise(x)
         z = self.first_layer(x)
@@ -386,6 +419,7 @@ class ACR_HJ(LIONmodel.LIONmodel):
             z = layer(z, t, x)
 
         z = self.last_layer(z)
+        # print(self.pool(z).mean(),self.L2(z).mean())
         return self.pool(z).reshape(-1, 1)
 
     def estimate_lambda(self, dataset=None):
@@ -401,8 +435,14 @@ class ACR_HJ(LIONmodel.LIONmodel):
             self.lamb = residual.mean() / len(dataset)
         print("Estimated lambda: " + str(self.lamb))
 
+    # def output(self, x):
+    # return self.AT(x)
+
     def var_energy(self, x, y):
+        # return torch.norm(x) + 0.5*(torch.norm(self.A(x)-y,dim=(2,3))**2).sum()#self.lamb * self.forward(x).sum()
         return 0.5 * ((self.A(x) - y) ** 2).sum() + self.lamb * self.forward(x).sum()
+
+    ### What is the difference between .sum() and .mean()??? idfk but PSNR is lower when I do .sum
 
     def output(self, y, truth=None):
         x0 = []
@@ -410,6 +450,9 @@ class ACR_HJ(LIONmodel.LIONmodel):
         for i in range(y.shape[0]):
             x0.append(fdk(self.op, y[i]))
         x = torch.stack(x0)
+        # print(x.shape)
+        # print(x.min(),x.max())
+        # print(my_psnr(truth.detach().to(device),x.detach()).mean(),my_ssim(truth.detach().to(device),x.detach()).mean())
         x = torch.nn.Parameter(x)  # .requires_grad_(True)
 
         optimizer = torch.optim.SGD(
@@ -421,7 +464,14 @@ class ACR_HJ(LIONmodel.LIONmodel):
         prevpsn = 0
         curpsn = 0
         for j in range(self.model_parameters.no_steps):
+            # print(x.min(),x.max())
+            # data_misfit=self.A(x)-y
+            # data_misfit_grad = self.AT(data_misfit)
+
             optimizer.zero_grad()
+            # reg_func=self.lamb * self.forward(x).mean()
+            # reg_func.backward()
+            # print(x.requires_grad, reg_func.requires_grad)
             energy = self.var_energy(x, y)
             energy.backward()
             while (
@@ -431,15 +481,24 @@ class ACR_HJ(LIONmodel.LIONmodel):
                 lr = self.model_parameters.beta_rate * lr
             for g in optimizer.param_groups:
                 g["lr"] = lr
-
+            # x.grad+=data_misfit_grad
             if truth is not None:
                 loss = torch.nn.MSELoss()(x.detach(), truth.detach().to(device))
                 psnr_val = my_psnr(truth.detach().to(device), x.detach()).mean()
                 ssim_val = my_ssim(truth.detach().to(device), x.detach()).mean()
+                # wandb.log({'MSE Loss': loss.item(),'SSIM':ssim_val,'PSNR':psnr_val})
+                # wandb.log({'MSE Loss'+str(self.model_parameters.step_size): loss.item(),'SSIM'+str(self.model_parameters.step_size):ssim_val,'PSNR'+str(self.model_parameters.step_size):psnr_val})
                 print(
                     f"{j}: SSIM: {my_ssim(truth.to(device).detach(),x.detach())}, PSNR: {my_psnr(truth.to(device).detach(),x.detach())}, Energy: {energy.detach().item()}"
                 )
 
+            #     if(self.args.outp):
+            #         print(j)
+            #     prevpsn=curpsn
+            #     curpsn=psnr
+            #     if(self.args.earlystop is True and curpsn<prevpsn):
+            #         writer.close()
+            #         return guess
             optimizer.step()
             x.clamp(min=0.0)
         return x.detach()
@@ -503,6 +562,7 @@ def fdk_from_geo(sino: torch.Tensor, geo: Geometry):
 def fdk(sino: torch.Tensor, op: ts.Operator.Operator) -> torch.Tensor:
     B, _, _, _ = sino.shape
     recon = None
+    # ts fdk doesn't support mini-batches so we apply it one at a time to each batch
     for i in range(B):
         sub_recon = ts_fdk(op, sino[i])
         sub_recon = torch.clip(sub_recon, min=0)
@@ -540,43 +600,105 @@ class WGAN_HJ_loss(nn.Module):
         interpolates_x = (
             alpha * real_samples + ((1 - alpha) * fake_samples)
         ).requires_grad_(True)
+        # print(interpolates_x.shape)
+        # t = torch.from_numpy(np.random.uniform(0.0, T))
+        # t = torch.distributions.Uniform(0, T).sample().requires_grad_(True)
 
-        interpolates_x_fake = (
-            alpha * fake_samples + ((1 - alpha) * fake_samples)
-        ).requires_grad_(True)
+        # t = torch.Tensor(np.random.random((real_samples.size(0), 1, 512, 512))).type_as(
+        # real_samples
+        # )
 
+        # t = torch.Tensor(np.random.random((real_samples.size(0), 1, 1, 1))).type_as(
+        #     real_samples
+        # )
+
+        # t = t.expand(2,1,512,512)
+        # print(t.shape)
+        # net_interpolates = model(interpolates_x, t)
+
+        # print(net_interpolates.shape)
+
+        # fake = (
+        #     torch.Tensor(real_samples.shape[0], 1)
+        #     .fill_(1.0)
+        #     .type_as(real_samples)
+        #     .requires_grad_(False)
+        # )
+
+        # x = torch.cat((t, interpolates_x), dim=1)
+
+        # x = [t, interpolates_x]
         t = t.requires_grad_(True)
 
         fct = model(interpolates_x, t)
-        fct_fake = model(interpolates_x_fake, t)
 
         u_x = fwd_gradients(fct, interpolates_x)
         u_x = u_x.reshape(u_x.shape[0], -1)
 
-        u_x_fake = fwd_gradients(fct_fake, interpolates_x_fake)
-        u_x_fake = u_x_fake.reshape(u_x.shape[0], -1)
-
         u_t = fwd_gradients(fct, t)
+        # print(u_tx.shape)
+        # u_t = u_tx[:, -1:]
+        # u_x = u_tx[:, 0:-1]
 
-        # wgan_loss = (
-        #     model(real_samples, torch.zeros_like(t)).mean()
-        #     - model(fake_samples, torch.zeros_like(t)).mean()
-        #     + self.mu * (((u_x.norm(2, dim=1) - 1)) ** 2).mean()
-        # )
-        t_expanded = t[:, None, None, None]
-        wgan_loss_new = (
-            model(real_samples, t * 0).mean()
-            - model(fake_samples - t_expanded * u_x_fake, t * 0).mean()
-            + self.mu * ((1 + t)((u_x.norm(2, dim=1) - 1)) ** 2).mean()
+        # gradients_x = torch.autograd.grad(
+        #     outputs=net_interpolates,
+        #     inputs=interpolates_x,
+        #     grad_outputs=fake,
+        #     create_graph=True,
+        #     retain_graph=True,
+        #     only_inputs=True,
+        # )[0]
+        # print(gradients_x.shape)
+
+        # gradients_t = torch.autograd.grad(
+        #     outputs=net_interpolates,
+        #     inputs=t,
+        #     grad_outputs=fake,
+        #     create_graph=True,
+        #     retain_graph=True,
+        #     only_inputs=True,
+        # )[0]
+        # print(gradients_t.shape)
+
+        # gradients_x = gradients_x.view(gradients_x.size(0), -1)
+        # gradients_t = gradients_t.view(gradients_t.size(0), -1)
+
+        wgan_loss = (
+            model(real_samples, torch.zeros_like(t)).mean()
+            - model(fake_samples, torch.zeros_like(t)).mean()
+            + self.mu * (((u_x.norm(2, dim=1) - 1)) ** 2).mean()
         )
         pinn_loss = ((u_t + 1 / 2 * u_x.norm(2, dim=1) ** 2) ** 2).mean()
-        print("WGAN-loss:", wgan_loss_new)
+        print("WGAN-loss:", wgan_loss)
         print("PINN-loss:", pinn_loss)
         return (
             pinn_loss,
-            wgan_loss_new,
-            self.mu_1 * pinn_loss + 1 * wgan_loss_new,
+            wgan_loss,
+            self.mu_1 * pinn_loss + 1 * wgan_loss,
         )  # it was 0 * before...not sure if that was what we wanted
+
+
+#%% FBP
+
+
+def fdk_from_geo(sino: torch.Tensor, geo: Geometry):
+    B, _, _, _ = sino.shape
+    op = make_operator(geo)
+    return fdk(sino, op, *geo.image_size[1:])
+
+
+def fdk(sino: torch.Tensor, op: ts.Operator.Operator) -> torch.Tensor:
+    B, _, _, _ = sino.shape
+    recon = None
+    # ts fdk doesn't support mini-batches so we apply it one at a time to each batch
+    for i in range(B):
+        sub_recon = ts_fdk(op, sino[i])
+        sub_recon = torch.clip(sub_recon, min=0)
+        if recon is None:
+            recon = sino.new_zeros(B, 1, *sub_recon.shape[1:])
+        recon[i] = sub_recon
+    assert recon is not None
+    return recon
 
 
 # % Chose device:
@@ -585,9 +707,9 @@ torch.cuda.set_device(device)
 # Define your data paths
 savefolder = pathlib.Path("/store/DAMTP/na673/")
 
-final_result_fname = savefolder.joinpath("ACR_HJ_new_loss_final_iter.pt")
-checkpoint_fname = savefolder.joinpath("ACR_HJ_new_loss_check_*.pt")
-validation_fname = savefolder.joinpath("ACR_HJ_new_loss_min_val.pt")
+final_result_fname = savefolder.joinpath("ACR_HJ_final_iter.pt")
+checkpoint_fname = savefolder.joinpath("ACR_HJ_check_*.pt")
+validation_fname = savefolder.joinpath("ACR_HJ_min_val.pt")
 
 #%% Define experiment
 # experiment = ct_experiments.LowDoseCTRecon(datafolder=datafolder)
@@ -658,12 +780,15 @@ for epoch in range(start_epoch, train_param.epochs):
     for sinogram, target_reconstruction in tqdm(lidc_dataloader):
 
         image = fdk(sinogram, op)
+        # print(image.shape)
         optimiser.zero_grad()
+        # reconstruction = model(image) <- different type of denoising here!
 
         reconstruction = image
+        # print(reconstruction.shape)
 
         t = torch.Tensor(
-            np.random.random((target_reconstruction.size(0), 1)) * 1e-4
+            np.random.random((target_reconstruction.size(0), 1e-4))
         ).type_as(target_reconstruction)
 
         loss_pinn, loss_ar, loss = loss_fcn(
@@ -766,5 +891,5 @@ model.save(
 
 
 # in order to not stop the code when the laptop is closed:
-# nohup python ACR_HJ_train_new_loss.py &
+# nohup python ACR_HJ_train.py &
 # tail -f nohup.out
